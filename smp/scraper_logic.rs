@@ -119,6 +119,7 @@ pub async fn find_text_pattern_selector_near_anchor(
 pub async fn find_stock_price_selector(
     document: &Html,
     anchor_text: &str,
+    code: &str, // New parameter to avoid mistaking the code for the price
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     if let Some(name_area) = find_search_area_around_anchor(document, anchor_text) {
         let mut zenjitsuhi_element_opt = None;
@@ -145,7 +146,8 @@ pub async fn find_stock_price_selector(
                                 && cleaned_text.parse::<f64>().is_ok()
                                 && !trimmed_text.starts_with('+')
                                 && !trimmed_text.starts_with('-')
-                                && !trimmed_text.contains('%') // Ensure it's not a percentage
+                                && !trimmed_text.contains('%')
+                                && cleaned_text != code // <-- The key fix
                             {
                                 return Ok(Some(build_selector(&span_element)));
                             }
@@ -224,6 +226,47 @@ pub async fn find_stock_update_time_selector(
             if let Some(time_element) = footer_element.select(&time_tag_selector).next() {
                 return Ok(Some(build_selector(&time_element)));
             }
+        }
+    }
+
+    Ok(None)
+}
+
+// --- Index-specific finders ---
+pub async fn find_dji_update_time_selector(
+    document: &Html,
+) -> Result<Option<String>, Box<dyn Error>> {
+    // Find the footer element which seems to have a stable class name, based on user's provided selector.
+    let footer_selector_str = "._CommonPriceBoard__mainFooter_1g7gt_48";
+    let footer_selector = Selector::parse(footer_selector_str)
+        .map_err(|e| ScraperError(format!("Failed to parse index footer selector: {:?}", e)))?;
+
+    if let Some(footer_element) = document.select(&footer_selector).next() {
+        // Within that footer, find the <time> element.
+        let time_selector = Selector::parse("time")
+            .map_err(|e| ScraperError(format!("Failed to parse time tag selector: {:?}", e)))?;
+        if let Some(time_element) = footer_element.select(&time_selector).next() {
+            return Ok(Some(build_selector(&time_element)));
+        }
+    }
+
+    Ok(None)
+}
+
+pub async fn find_nikkei_update_time_selector(
+    document: &Html,
+) -> Result<Option<String>, Box<dyn Error>> {
+    // Find the footer element which seems to have a stable class name, based on user's provided selector.
+    let footer_selector_str = ".PriceBoard__mainFooter__16pO";
+    let footer_selector = Selector::parse(footer_selector_str)
+        .map_err(|e| ScraperError(format!("Failed to parse Nikkei footer selector: {:?}", e)))?;
+
+    if let Some(footer_element) = document.select(&footer_selector).next() {
+        // Within that footer, find the <time> element.
+        let time_selector = Selector::parse("time")
+            .map_err(|e| ScraperError(format!("Failed to parse time tag selector: {:?}", e)))?;
+        if let Some(time_element) = footer_element.select(&time_selector).next() {
+            return Ok(Some(build_selector(&time_element)));
         }
     }
 

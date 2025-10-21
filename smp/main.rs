@@ -9,20 +9,46 @@ mod scraper_logic;
 
 use models::StockData;
 
+enum CodeType {
+    Stock,
+    Fx,
+    Dji,
+    Nikkei,
+}
+
+fn get_code_type(code: &str) -> CodeType {
+    let upper_code = code.to_uppercase();
+    if upper_code == "%5EDJI" || upper_code == "^DJI" || upper_code == "DJI" {
+        CodeType::Dji
+    } else if upper_code == "998407.O" || upper_code == ".N225" || upper_code == "%5EN225" {
+        CodeType::Nikkei
+    } else if code.ends_with("=FX") {
+        CodeType::Fx
+    } else {
+        CodeType::Stock
+    }
+}
+
 /// Receives a stock code and returns a URL for Yahoo Finance.
 fn build_url_from_code(code: &str) -> String {
-    if code == "%5EDJI" || code == "^DJI" || code == "DJI" { // Added || code == "DJI"
-        "https://finance.yahoo.co.jp/quote/%5EDJI".to_string()
-    } else if code.ends_with(".O") || code.ends_with("=FX") {
-        format!("https://finance.yahoo.co.jp/quote/{}", code)
-    } else { // For standard TSE stocks
-        format!("https://finance.yahoo.co.jp/quote/{}.T", code)
+    match get_code_type(code) {
+        CodeType::Dji => "https://finance.yahoo.co.jp/quote/%5EDJI".to_string(),
+        CodeType::Nikkei => "https://finance.yahoo.co.jp/quote/998407.O".to_string(),
+        CodeType::Fx => format!("https://finance.yahoo.co.jp/quote/{}", code),
+        CodeType::Stock => {
+            if code.ends_with(".O") {
+                format!("https://finance.yahoo.co.jp/quote/{}", code)
+            } else {
+                format!("https://finance.yahoo.co.jp/quote/{}.T", code)
+            }
+        }
     }
 }
 
 /// Scrapes a single stock page dynamically without any prior knowledge of the stock's name.
 async fn scrape_dynamically(code: &str) -> Result<StockData, Box<dyn Error>> {
     let url = build_url_from_code(code);
+    let code_type = get_code_type(code);
 
     let response = reqwest::get(&url).await?;
     let body = response.text().await?;
@@ -47,19 +73,34 @@ async fn scrape_dynamically(code: &str) -> Result<StockData, Box<dyn Error>> {
     let change_percent_selector_opt;
     let update_time_selector_opt;
 
-    if code.ends_with("=FX") {
-        // FX-specific logic
-        price_selector_opt = scraper_logic::find_fx_price_selector(&document).await?;
-        change_selector_opt = scraper_logic::find_fx_change_selector(&document).await?;
-        change_percent_selector_opt = None; // User requested to not scrape change_percent for FX
-        update_time_selector_opt = scraper_logic::find_fx_update_time_selector(&document).await?;
-    } else {
-        // Stock-specific logic
-        let zenjitsuhi_anchor = "前日比";
-        price_selector_opt = scraper_logic::find_stock_price_selector(&document, anchor_name).await?;
-        change_selector_opt = scraper_logic::find_stock_change_selector(&document, zenjitsuhi_anchor).await?;
-        change_percent_selector_opt = scraper_logic::find_stock_change_percent_selector(&document, zenjitsuhi_anchor).await?;
-        update_time_selector_opt = scraper_logic::find_stock_update_time_selector(&document).await?;
+    match code_type {
+        CodeType::Fx => {
+            // FX-specific logic
+            price_selector_opt = scraper_logic::find_fx_price_selector(&document).await?;
+            change_selector_opt = scraper_logic::find_fx_change_selector(&document).await?;
+            change_percent_selector_opt = None; // User requested to not scrape change_percent for FX
+            update_time_selector_opt = scraper_logic::find_fx_update_time_selector(&document).await?;
+        }
+        CodeType::Dji => { // DJI-specific logic
+            price_selector_opt = scraper_logic::find_stock_price_selector(&document, anchor_name, code).await?;
+            change_selector_opt = scraper_logic::find_stock_change_selector(&document, anchor_name).await?;
+            change_percent_selector_opt = scraper_logic::find_stock_change_percent_selector(&document, anchor_name).await?;
+            update_time_selector_opt = scraper_logic::find_dji_update_time_selector(&document).await?;
+        }
+        CodeType::Nikkei => { // Nikkei-specific logic
+            price_selector_opt = scraper_logic::find_stock_price_selector(&document, anchor_name, code).await?;
+            change_selector_opt = scraper_logic::find_stock_change_selector(&document, anchor_name).await?;
+            change_percent_selector_opt = scraper_logic::find_stock_change_percent_selector(&document, anchor_name).await?;
+            update_time_selector_opt = scraper_logic::find_nikkei_update_time_selector(&document).await?;
+        }
+        CodeType::Stock => {
+            // Stock-specific logic
+            let zenjitsuhi_anchor = "前日比";
+            price_selector_opt = scraper_logic::find_stock_price_selector(&document, anchor_name, code).await?;
+            change_selector_opt = scraper_logic::find_stock_change_selector(&document, zenjitsuhi_anchor).await?;
+            change_percent_selector_opt = scraper_logic::find_stock_change_percent_selector(&document, zenjitsuhi_anchor).await?;
+            update_time_selector_opt = scraper_logic::find_stock_update_time_selector(&document).await?;
+        }
     }
 
     // 3. Scrape data using the found selectors.
@@ -81,17 +122,18 @@ async fn scrape_dynamically(code: &str) -> Result<StockData, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let stock_codes: Vec<String> = env::args().skip(1)
-        .flat_map(|arg| {
-            // split が借用イテレータを返すので、ここで所有権を持つ Vec<String> に集める
-            arg.split(',').map(str::to_string).collect::<Vec<String>>()
-        }) // カンマで分割し、すべてを収集
-        .collect();
+    let args: Vec<String> = env::args().skip(1).collect();
+    let mut stock_codes: Vec<String> = Vec::new();
+    for arg in args {
+        for code in arg.split(',') {
+            stock_codes.push(code.to_string());
+        }
+    }
 
     if stock_codes.is_empty() {
         eprintln!("Usage: auto_selecter1 <stock_code_1> <stock_code_2> ...");
         eprintln!("Example: auto_selecter1 6758 7203 USDJPY=FX");
-        return Ok(())
+        return Ok(());
     }
 
     let mut all_stock_data: Vec<StockData> = Vec::new();
